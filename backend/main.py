@@ -27,11 +27,14 @@ app = FastAPI(
 # CORS
 # ============================================================
 
+# ============================================================
+# CORS
+# ============================================================
+
 app.add_middleware(
     CORSMiddleware,
+    allow_origin_regex=r"https://frontend-[a-z0-9-]+-surya-manohar-reddy-s-projects\.vercel\.app",
     allow_origins=[
-        "https://frontend-git-main-surya-manohar-reddy-s-projects.vercel.app",
-        "https://frontend-ejbayajbb-surya-manohar-reddy-s-projects.vercel.app",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],

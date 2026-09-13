@@ -12,7 +12,7 @@ import Login from "./pages/Login";
 import Register from "./pages/Register";
 import RailwayTimeline from "./components/RailwayTimeline";
 
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = "https://ai-railway-block-planner.onrender.com";
 
 /* =========================================================
    DASHBOARD

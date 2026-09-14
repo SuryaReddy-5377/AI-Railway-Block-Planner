@@ -36,7 +36,9 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://frontend-[a-z0-9-]+-surya-manohar-reddy-s-projects\.vercel\.app",
+    # Allow Vercel production/preview deployments and local Vite development.
+    # We intentionally do NOT use allow_origins=["*"] with credentials.
+    allow_origin_regex=r"https://.*\\.vercel\\.app",
     allow_origins=[
         "https://frontend-sigma-nine-83.vercel.app",
         "http://localhost:5173",

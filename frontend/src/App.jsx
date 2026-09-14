@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import "./App.css";
 import RailwayTimeline from "./components/RailwayTimeline";
 import Login from "./pages/Login";
+import Register from "./pages/Register";
 
 const API_URL = "https://ai-railway-block-planner.onrender.com";
 
@@ -87,8 +89,11 @@ const BASE_OPTIONS = {
 };
 
 function App() {
+  const location = useLocation();
+  const navigate = useNavigate();
+
   const [loggedIn, setLoggedIn] = useState(
-    localStorage.getItem("isLoggedIn") === "true"
+    sessionStorage.getItem("isLoggedIn") === "true"
   );
 
   const [stats, setStats] = useState({
@@ -119,11 +124,20 @@ function App() {
   // --------------------------------------------------
 
   useEffect(() => {
+    // Remove old login flags from previous versions.
+    // Authentication for this app is intentionally session-based.
+    localStorage.removeItem("isLoggedIn");
+    localStorage.removeItem("username");
+    localStorage.removeItem("token");
+    localStorage.removeItem("access_token");
+
     const updateLogin = () => {
       setLoggedIn(
-        localStorage.getItem("isLoggedIn") === "true"
+        sessionStorage.getItem("isLoggedIn") === "true"
       );
     };
+
+    updateLogin();
 
     window.addEventListener("storage", updateLogin);
     window.addEventListener("focus", updateLogin);
@@ -132,7 +146,7 @@ function App() {
       window.removeEventListener("storage", updateLogin);
       window.removeEventListener("focus", updateLogin);
     };
-  }, []);
+  }, [location.pathname]);
 
   // --------------------------------------------------
   // STATS
@@ -684,26 +698,35 @@ function App() {
   // --------------------------------------------------
 
   const logout = () => {
-    localStorage.removeItem(
-      "isLoggedIn"
-    );
+    sessionStorage.removeItem("isLoggedIn");
+    sessionStorage.removeItem("username");
+    sessionStorage.removeItem("token");
+    sessionStorage.removeItem("access_token");
 
-    localStorage.removeItem(
-      "username"
-    );
+    // Also clear legacy localStorage flags.
+    localStorage.removeItem("isLoggedIn");
+    localStorage.removeItem("username");
+    localStorage.removeItem("token");
+    localStorage.removeItem("access_token");
 
     setLoggedIn(false);
+    setManager(null);
+    setPlan(null);
+    setError("");
+    setMessage("");
 
-    window.history.pushState(
-      {},
-      "",
-      "/"
-    );
+    navigate("/", { replace: true });
   };
 
   // --------------------------------------------------
   // LOGIN
   // --------------------------------------------------
+
+  // Register must be checked BEFORE the login guard.
+  // Otherwise a stale/active login state can prevent /register from opening.
+  if (location.pathname === "/register") {
+    return <Register />;
+  }
 
   if (!loggedIn) {
     return <Login />;

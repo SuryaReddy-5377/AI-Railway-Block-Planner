@@ -1,9 +1,7 @@
-import { useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
 import "./App.css";
 import RailwayTimeline from "./components/RailwayTimeline";
 import Login from "./pages/Login";
-import Register from "./pages/Register";
 
 const API_URL = "https://ai-railway-block-planner.onrender.com";
 
@@ -89,7 +87,6 @@ const BASE_OPTIONS = {
 };
 
 function App() {
-  const location = useLocation();
   const [loggedIn, setLoggedIn] = useState(
     localStorage.getItem("isLoggedIn") === "true"
   );
@@ -236,10 +233,9 @@ function App() {
       setRecords([]);
 
       setError(
-  err.message === "Failed to fetch"
-    ? "Unable to connect to Railway Data Service."
-    : err.message || "Unable to load records."
-);
+        err.message ||
+          "Unable to load records."
+      );
     } finally {
       setManagerLoading(false);
     }
@@ -307,14 +303,6 @@ function App() {
   // GET ID
   // --------------------------------------------------
 
-  const getIdForType = (type, item) => {
-    if (type === "tasks") return item?.task_id;
-    if (type === "trains") return item?.train_id;
-    if (type === "blocks") return item?.block_id;
-    if (type === "assets") return item?.asset_id;
-    return "";
-  };
-
   const getId = (item) => {
     if (manager === "tasks") {
       return item.task_id;
@@ -342,89 +330,88 @@ function App() {
   const saveData = async (event) => {
     event.preventDefault();
 
-    if (!manager) return;
+    if (!manager) {
+      return;
+    }
 
     setSaving(true);
     setError("");
     setMessage("");
 
     try {
-      const payload = { ...form };
+      const payload = {
+        ...form,
+      };
 
-      if (manager === "tasks" || manager === "blocks") {
-        payload.duration_hours = Number(payload.duration_hours);
-        if (!Number.isFinite(payload.duration_hours) || payload.duration_hours <= 0) {
-          throw new Error("Duration must be greater than 0.");
-        }
+      if (
+        manager === "tasks" ||
+        manager === "blocks"
+      ) {
+        payload.duration_hours =
+          Number(payload.duration_hours);
       }
 
-      const isEditing = editingId !== null;
-      const idField = {
-        tasks: "task_id",
-        trains: "train_id",
-        blocks: "block_id",
-        assets: "asset_id",
-      }[manager];
+      const isEditing =
+        editingId !== null;
 
       const url = isEditing
-        ? `${API_URL}${URLS[manager]}/${encodeURIComponent(editingId)}`
+        ? `${API_URL}${URLS[manager]}/${encodeURIComponent(
+            editingId
+          )}`
         : `${API_URL}${URLS[manager]}`;
 
-      const response = await fetch(url, {
-        method: isEditing ? "PUT" : "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
+      const response = await fetch(
+        url,
+        {
+          method: isEditing
+            ? "PUT"
+            : "POST",
 
-      const text = await response.text();
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+
+          body: JSON.stringify(
+            payload
+          ),
+        }
+      );
+
+      const text =
+        await response.text();
 
       if (!response.ok) {
         let detail = text;
 
         try {
-          const parsed = JSON.parse(text);
-          detail = parsed.detail || parsed.message || text;
+          const parsed =
+            JSON.parse(text);
+
+          detail =
+            parsed.detail ||
+            parsed.message ||
+            text;
         } catch {}
 
-        throw new Error(detail || "Backend rejected the data.");
+        throw new Error(
+          detail ||
+            "Backend rejected the data."
+        );
       }
 
-      let savedRecord = payload;
-
-      try {
-        const parsed = JSON.parse(text);
-        savedRecord =
-          parsed.task ||
-          parsed.train ||
-          parsed.block ||
-          parsed.asset ||
-          payload;
-      } catch {}
-
       /*
-       * Update the visible table locally immediately.
-       * We deliberately do NOT make a second GET request here.
+       * SUCCESS
        *
-       * This fixes the old false "Failed to fetch" situation where
-       * POST succeeded but the follow-up GET failed because of CORS.
+       * First clear the form.
        */
-      setRecords((previous) => {
-        if (!isEditing) {
-          return [...previous, savedRecord];
-        }
-
-        return previous.map((item) =>
-          String(item?.[idField]) === String(editingId)
-            ? { ...item, ...savedRecord }
-            : item
-        );
+      setForm({
+        ...EMPTY[manager],
       });
 
-      setForm({ ...EMPTY[manager] });
       setEditingId(null);
 
+  
       setMessage(
         isEditing
           ? "Data updated successfully."
@@ -432,17 +419,24 @@ function App() {
       );
 
       /*
-       * Statistics are helpful but must never turn a successful
-       * database write into a displayed save error.
+       * Immediately reload the table.
+       * The new record should appear here.
        */
-      try {
-        await loadStats();
-      } catch (statsError) {
-        console.warn("Statistics refresh failed:", statsError);
-      }
+      await loadRecords(manager);
+
+      /*
+       * Update dashboard counters.
+       */
+      await loadStats();
+
     } catch (err) {
       console.error(err);
-      setError(err.message || "Unable to save data.");
+
+      setError(
+        err.message ||
+          "Unable to save data."
+      );
+
     } finally {
       setSaving(false);
     }
@@ -484,61 +478,73 @@ function App() {
   const deleteData = async (item) => {
     const id = getId(item);
 
-    if (!id) return;
+    if (!id) {
+      return;
+    }
 
-    const confirmed = window.confirm(`Delete ${id}?`);
-    if (!confirmed) return;
+    const confirmed =
+      window.confirm(
+        `Delete ${id}?`
+      );
+
+    if (!confirmed) {
+      return;
+    }
 
     setError("");
     setMessage("");
 
     try {
-      const response = await fetch(
-        `${API_URL}${URLS[manager]}/${encodeURIComponent(id)}`,
-        {
-          method: "DELETE",
-        }
-      );
+      const response =
+        await fetch(
+          `${API_URL}${URLS[manager]}/${encodeURIComponent(
+            id
+          )}`,
+          {
+            method: "DELETE",
+          }
+        );
 
-      const text = await response.text();
+      const text =
+        await response.text();
 
       if (!response.ok) {
         let detail = text;
 
         try {
-          const parsed = JSON.parse(text);
-          detail = parsed.detail || parsed.message || text;
+          detail =
+            JSON.parse(text).detail ||
+            text;
         } catch {}
 
-        throw new Error(detail || "Unable to delete data.");
+        throw new Error(
+          detail ||
+            "Unable to delete data."
+        );
       }
 
-      /*
-       * Update the visible table locally instead of depending on a
-       * second GET request. This keeps delete reliable even if a
-       * browser-side GET has a temporary CORS/network problem.
-       */
-      setRecords((previous) =>
-        previous.filter(
-          (record) => String(getIdForType(manager, record)) !== String(id)
-        )
+      setMessage(
+        `${id} deleted successfully.`
       );
 
       if (editingId === id) {
         setEditingId(null);
-        setForm({ ...EMPTY[manager] });
+
+        setForm({
+          ...EMPTY[manager],
+        });
       }
 
-      setMessage(`${id} deleted successfully.`);
+      await loadRecords(manager);
+      await loadStats();
 
-      try {
-        await loadStats();
-      } catch (statsError) {
-        console.warn("Statistics refresh failed:", statsError);
-      }
     } catch (err) {
       console.error(err);
-      setError(err.message || "Unable to delete data.");
+
+      setError(
+        err.message ||
+          "Unable to delete data."
+      );
     }
   };
 
@@ -563,70 +569,76 @@ function App() {
   // --------------------------------------------------
 
   const uploadExcel = async (event) => {
-    const file = event.target.files?.[0];
+    const file =
+      event.target.files?.[0];
 
-    if (!file) return;
+    if (!file) {
+      return;
+    }
 
     setUploading(true);
     setError("");
     setMessage("");
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
+      const formData =
+        new FormData();
 
-      const response = await fetch(`${API_URL}/upload-excel`, {
-        method: "POST",
-        body: formData,
-      });
+      formData.append(
+        "file",
+        file
+      );
 
-      const text = await response.text();
+      const response =
+        await fetch(
+          `${API_URL}/upload-excel`,
+          {
+            method: "POST",
+            body: formData,
+          }
+        );
+
+      const text =
+        await response.text();
 
       if (!response.ok) {
         let detail = text;
 
         try {
-          const parsed = JSON.parse(text);
-          detail = parsed.detail || parsed.message || text;
+          detail =
+            JSON.parse(text).detail ||
+            text;
         } catch {}
 
-        throw new Error(detail || "Excel upload failed.");
+        throw new Error(
+          detail ||
+            "Excel upload failed."
+        );
       }
-
-      let imported = null;
-
-      try {
-        imported = JSON.parse(text).imported || null;
-      } catch {}
 
       setMessage(
-        imported
-          ? `Excel uploaded successfully — ${imported.maintenance_tasks || 0} tasks, ${imported.available_blocks || 0} blocks, ${imported.train_schedule || 0} trains and ${imported.assets || 0} assets imported.`
-          : "Excel uploaded successfully."
+        "Excel uploaded successfully."
       );
 
-      try {
-        await loadStats();
-      } catch (statsError) {
-        console.warn("Statistics refresh failed:", statsError);
+      await loadStats();
+
+      if (manager) {
+        await loadRecords(
+          manager
+        );
       }
 
-      /*
-       * Refresh the open manager if possible, but a refresh problem
-       * must not turn a successful Excel import into an error.
-       */
-      if (manager) {
-        try {
-          await loadRecords(manager);
-        } catch (recordsError) {
-          console.warn("Manager refresh failed:", recordsError);
-        }
-      }
     } catch (err) {
       console.error(err);
-      setError(err.message || "Excel upload failed.");
+
+      setError(
+        err.message ||
+          "Excel upload failed."
+      );
+
     } finally {
       setUploading(false);
+
       event.target.value = "";
     }
   };
@@ -638,50 +650,44 @@ function App() {
   const generatePlan = async () => {
     setLoading(true);
     setError("");
-    setPlan(null);
-
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => {
-      controller.abort();
-    }, 30000);
 
     try {
-      const response = await fetch(`${API_URL}/generate-plan`, {
-        signal: controller.signal,
-      });
+      const response =
+        await fetch(
+          `${API_URL}/generate-plan`
+        );
 
-      const text = await response.text();
+      const text =
+        await response.text();
 
       if (!response.ok) {
         let detail = text;
 
         try {
-          const parsed = JSON.parse(text);
-          detail = parsed.detail || parsed.message || text;
+          detail =
+            JSON.parse(text).detail ||
+            text;
         } catch {}
 
-        throw new Error(detail || "Unable to generate plan.");
+        throw new Error(
+          detail ||
+            "Unable to generate plan."
+        );
       }
 
-      const data = JSON.parse(text);
+      setPlan(
+        JSON.parse(text)
+      );
 
-      if (data.status === "error" || data.error) {
-        throw new Error(data.error || "The planning engine could not generate a plan.");
-      }
-
-      setPlan(data);
     } catch (err) {
       console.error(err);
 
-      if (err?.name === "AbortError") {
-        setError(
-          "Plan generation took too long. The backend planning engine was stopped after 30 seconds."
-        );
-      } else {
-        setError(err.message || "Unable to generate plan.");
-      }
+      setError(
+        err.message ||
+          "Unable to generate plan."
+      );
+
     } finally {
-      window.clearTimeout(timeoutId);
       setLoading(false);
     }
   };
@@ -709,31 +715,12 @@ function App() {
   };
 
   // --------------------------------------------------
-  // AI DECISION CONFIDENCE
-  // --------------------------------------------------
-
-  const getConfidence = (item) => {
-    if (
-      item?.ai_confidence !== undefined &&
-      item?.ai_confidence !== null
-    ) {
-      return `${item.ai_confidence}%`;
-    }
-
-    return "—";
-  };
-
-  // --------------------------------------------------
   // LOGIN
   // --------------------------------------------------
 
   if (!loggedIn) {
-  if (location.pathname === "/register") {
-    return <Register />;
+    return <Login />;
   }
-
-  return <Login />;
-}
 
   // --------------------------------------------------
   // DASHBOARD
@@ -1710,14 +1697,12 @@ function App() {
                     <th>Task</th>
                     <th>Priority</th>
                     <th>Section</th>
-                    <th>Asset</th>
                     <th>Duration</th>
                     <th>
                       Recommended Block
                     </th>
                     <th>Time</th>
                     <th>Status</th>
-                    <th>AI Confidence</th>
                   </tr>
 
                 </thead>
@@ -1768,17 +1753,6 @@ function App() {
                         </td>
 
                         <td>
-                          <strong>
-                            {item.asset_id || "—"}
-                          </strong>
-                          {item.asset_condition ? (
-                            <div style={{ fontSize: "11px", opacity: 0.75 }}>
-                              {item.asset_condition}
-                            </div>
-                          ) : null}
-                        </td>
-
-                        <td>
                           {
                             item.duration_hours
                           } hrs
@@ -1814,30 +1788,6 @@ function App() {
                             {
                               item.status
                             }
-                          </span>
-                        </td>
-
-                        <td>
-                          <span
-                            style={{
-                              display: "inline-block",
-                              minWidth: "58px",
-                              padding: "5px 9px",
-                              borderRadius: "999px",
-                              textAlign: "center",
-                              fontWeight: 700,
-                              color: "#ffffff",
-                              background:
-                                getConfidence(item) === "—"
-                                  ? "rgba(120,135,160,0.35)"
-                                  : "rgba(30,130,210,0.35)",
-                              border:
-                                getConfidence(item) === "—"
-                                  ? "1px solid rgba(180,190,210,0.25)"
-                                  : "1px solid rgba(90,190,255,0.45)",
-                            }}
-                          >
-                            {getConfidence(item)}
                           </span>
                         </td>
 

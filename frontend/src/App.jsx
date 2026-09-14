@@ -236,9 +236,10 @@ function App() {
       setRecords([]);
 
       setError(
-        err.message ||
-          "Unable to load records."
-      );
+  err.message === "Failed to fetch"
+    ? "Unable to connect to Railway Data Service."
+    : err.message || "Unable to load records."
+);
     } finally {
       setManagerLoading(false);
     }

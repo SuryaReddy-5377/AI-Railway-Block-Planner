@@ -1,7 +1,9 @@
+import { useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
 import "./App.css";
 import RailwayTimeline from "./components/RailwayTimeline";
 import Login from "./pages/Login";
+import Register from "./pages/Register";
 
 const API_URL = "https://ai-railway-block-planner.onrender.com";
 
@@ -87,6 +89,7 @@ const BASE_OPTIONS = {
 };
 
 function App() {
+  const location = useLocation();
   const [loggedIn, setLoggedIn] = useState(
     localStorage.getItem("isLoggedIn") === "true"
   );
@@ -724,8 +727,12 @@ function App() {
   // --------------------------------------------------
 
   if (!loggedIn) {
-    return <Login />;
+  if (location.pathname === "/register") {
+    return <Register />;
   }
+
+  return <Login />;
+}
 
   // --------------------------------------------------
   // DASHBOARD

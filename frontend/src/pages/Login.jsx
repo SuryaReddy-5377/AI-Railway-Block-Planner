@@ -103,7 +103,7 @@ function Login() {
        * We wait until the backend confirms the login,
        * then navigate to the dashboard.
        */
-      navigate("/dashboard", { replace: true });
+     window.location.replace("/dashboard");
 
     } catch (err) {
       console.error("LOGIN ERROR:", err);

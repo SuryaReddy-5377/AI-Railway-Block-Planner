@@ -8,27 +8,13 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 
-
-# ============================================================
-# LOAD .ENV
-# ============================================================
-
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 ENV_FILE = BACKEND_DIR / ".env"
 
 load_dotenv(ENV_FILE)
 
-
-# ============================================================
-# MONGODB CONFIGURATION
-# ============================================================
-
 MONGO_URL = os.getenv("MONGO_URL")
-
-MONGODB_DATABASE = os.getenv(
-    "MONGODB_DATABASE",
-    "sih2026"
-)
+MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "sih2026")
 
 if not MONGO_URL:
     raise RuntimeError(
@@ -36,53 +22,45 @@ if not MONGO_URL:
         f"Expected .env file at: {ENV_FILE}"
     )
 
-
-# ============================================================
-# MONGODB CONNECTION
-# ============================================================
-
-client = MongoClient(MONGO_URL)
+# Reusable MongoDB client
+client = MongoClient(
+    MONGO_URL,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+    socketTimeoutMS=10000,
+    maxPoolSize=10,
+    minPoolSize=1,
+    retryWrites=True,
+)
 
 db = client[MONGODB_DATABASE]
 
 users_collection = db["users"]
 
+# Create indexes once
+users_collection.create_index("username", unique=True)
 
-# ============================================================
-# DATABASE INDEXES
-# ============================================================
-
-# Username must be unique.
-#
-# This index is kept as a normal unique index because every
-# user created by our application always has a username.
-users_collection.create_index(
-    "username",
-    unique=True
-)
-
-
-# Email must be unique when an email exists.
-#
-# partialFilterExpression prevents old documents that don't
-# have an email field from causing duplicate-null errors.
 users_collection.create_index(
     "email",
     unique=True,
-    partialFilterExpression={
-        "email": {
-            "$type": "string"
-        }
-    }
+    partialFilterExpression={"email": {"$type": "string"}}
 )
 
 
-# ============================================================
-# PASSWORD HASHING
-# ============================================================
+def check_database_connection():
+    """
+    Quickly check whether MongoDB is reachable.
+    Prevents requests from hanging for a very long time.
+    """
+    try:
+        client.admin.command("ping")
+        return True
+    except Exception as e:
+        print("MONGODB CONNECTION ERROR:", repr(e))
+        return False
+
 
 def hash_password(password: str) -> str:
-
     salt = secrets.token_bytes(16)
 
     password_hash = hashlib.pbkdf2_hmac(
@@ -92,20 +70,11 @@ def hash_password(password: str) -> str:
         120000
     )
 
-    return (
-        salt.hex()
-        + ":"
-        + password_hash.hex()
-    )
+    return salt.hex() + ":" + password_hash.hex()
 
 
-def verify_password(
-    password: str,
-    stored_hash: str
-) -> bool:
-
+def verify_password(password: str, stored_hash: str) -> bool:
     try:
-
         salt_hex, hash_hex = stored_hash.split(":")
 
         salt = bytes.fromhex(salt_hex)
@@ -124,19 +93,10 @@ def verify_password(
         )
 
     except (ValueError, TypeError):
-
         return False
 
 
-# ============================================================
-# CREATE USER
-# ============================================================
-
-def create_user(
-    username: str,
-    email: str,
-    password: str
-):
+def create_user(username: str, email: str, password: str):
 
     username = username.strip()
     email = email.strip().lower()
@@ -151,30 +111,35 @@ def create_user(
         raise ValueError("Password is required")
 
     if len(password) < 6:
-        raise ValueError(
-            "Password must be at least 6 characters"
+        raise ValueError("Password must be at least 6 characters")
+
+    # Check MongoDB before doing password hashing
+    if not check_database_connection():
+        raise RuntimeError(
+            "Database is temporarily unavailable. Please try again."
         )
 
     # Check existing username
     if users_collection.find_one(
-        {"username": username}
+        {"username": username},
+        {"_id": 1}
     ):
-        raise ValueError(
-            "Username already exists"
-        )
+        raise ValueError("Username already exists")
 
     # Check existing email
     if users_collection.find_one(
-        {"email": email}
+        {"email": email},
+        {"_id": 1}
     ):
-        raise ValueError(
-            "Email already registered"
-        )
+        raise ValueError("Email already registered")
+
+    # Hash only after validation/database checks
+    password_hash = hash_password(password)
 
     user = {
         "username": username,
         "email": email,
-        "password_hash": hash_password(password)
+        "password_hash": password_hash
     }
 
     try:
@@ -194,10 +159,6 @@ def create_user(
     }
 
 
-# ============================================================
-# LOGIN
-# ============================================================
-
 def authenticate_user(
     username_or_email: str,
     password: str
@@ -208,15 +169,17 @@ def authenticate_user(
     if not login_value or not password:
         return None
 
+    # Check database availability first
+    if not check_database_connection():
+        raise RuntimeError(
+            "Database is temporarily unavailable. Please try again."
+        )
+
     user = users_collection.find_one(
         {
             "$or": [
-                {
-                    "username": login_value
-                },
-                {
-                    "email": login_value.lower()
-                }
+                {"username": login_value},
+                {"email": login_value.lower()}
             ]
         }
     )

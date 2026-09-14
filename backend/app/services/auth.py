@@ -215,6 +215,7 @@ def create_user(
         "username": username,
         "email": email,
         "password_hash": password_hash,
+        "role": "user",
     }
 
     try:
@@ -285,4 +286,5 @@ def authenticate_user(
     return {
         "username": user.get("username"),
         "email": user.get("email"),
+        "role": user.get("role", "user"),
     }

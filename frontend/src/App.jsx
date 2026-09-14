@@ -4,6 +4,7 @@ import "./App.css";
 import RailwayTimeline from "./components/RailwayTimeline";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
+import { AdminUserManagement, AdminPlanApproval, UserDashboard } from "./RoleDashboard";
 
 const API_URL = "https://ai-railway-block-planner.onrender.com";
 
@@ -94,6 +95,10 @@ function App() {
 
   const [loggedIn, setLoggedIn] = useState(
     sessionStorage.getItem("isLoggedIn") === "true"
+  );
+
+  const [role, setRole] = useState(
+    sessionStorage.getItem("role") || "user"
   );
 
   const [stats, setStats] = useState({
@@ -206,7 +211,8 @@ function App() {
 
     try {
       const response = await fetch(
-        `${API_URL}${URLS[type]}`
+        `${API_URL}${URLS[type]}`,
+        { headers: { Authorization: `Bearer ${sessionStorage.getItem("token") || ""}` } }
       );
 
       const text = await response.text();
@@ -371,6 +377,7 @@ function App() {
       method: isEditing ? "PUT" : "POST",
       headers: {
         "Content-Type": "application/json",
+        Authorization: `Bearer ${sessionStorage.getItem("token") || ""}`,
       },
       body: JSON.stringify(payload),
     });
@@ -503,6 +510,9 @@ function App() {
           )}`,
           {
             method: "DELETE",
+            headers: {
+              Authorization: `Bearer ${sessionStorage.getItem("token") || ""}`,
+            },
           }
         );
 
@@ -595,6 +605,9 @@ function App() {
           `${API_URL}/upload-excel`,
           {
             method: "POST",
+            headers: {
+              Authorization: `Bearer ${sessionStorage.getItem("token") || ""}`,
+            },
             body: formData,
           }
         );
@@ -655,7 +668,12 @@ function App() {
     try {
       const response =
         await fetch(
-          `${API_URL}/generate-plan`
+          `${API_URL}/generate-plan`,
+          {
+            headers: {
+              Authorization: `Bearer ${sessionStorage.getItem("token") || ""}`,
+            },
+          }
         );
 
       const text =
@@ -702,6 +720,7 @@ function App() {
     sessionStorage.removeItem("username");
     sessionStorage.removeItem("token");
     sessionStorage.removeItem("access_token");
+    sessionStorage.removeItem("role");
 
     // Also clear legacy localStorage flags.
     localStorage.removeItem("isLoggedIn");
@@ -710,6 +729,7 @@ function App() {
     localStorage.removeItem("access_token");
 
     setLoggedIn(false);
+    setRole("user");
     setManager(null);
     setPlan(null);
     setError("");
@@ -732,8 +752,14 @@ function App() {
     return <Login />;
   }
 
+  // Normal users get a restricted maintenance portal.
+  // Admins keep the existing full planning dashboard.
+  if (role !== "admin") {
+    return <UserDashboard />;
+  }
+
   // --------------------------------------------------
-  // DASHBOARD
+  // ADMIN DASHBOARD
   // --------------------------------------------------
 
   return (
@@ -823,6 +849,9 @@ function App() {
           />
 
         </section>
+
+        <AdminUserManagement />
+        <AdminPlanApproval />
 
         {/* ==================================
             DATA MANAGEMENT

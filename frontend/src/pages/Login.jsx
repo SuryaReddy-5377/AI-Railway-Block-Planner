@@ -112,6 +112,11 @@ function Login() {
         String(returnedUsername)
       );
 
+      sessionStorage.setItem(
+        "role",
+        String(data?.user?.role || "user")
+      );
+
       if (data?.access_token) {
         sessionStorage.setItem(
           "token",

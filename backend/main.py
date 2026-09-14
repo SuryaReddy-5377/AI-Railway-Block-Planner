@@ -1,10 +1,16 @@
 from pathlib import Path
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone
 import re
+import os
+import time
+import json
+import base64
+import hmac
+import hashlib
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -17,6 +23,7 @@ from app.services.auth import (
     create_user,
     authenticate_user,
     db,
+    users_collection,
 )
 
 
@@ -36,22 +43,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-
-    # This project uses sessionStorage on the frontend rather than
-    # browser cookies, so API requests do not need credentialed CORS.
-    #
-    # Allowing all origins here also fixes Vercel preview URLs such as:
-    # https://frontend-i5ihw38ry-surya-manohar-reddy-s-projects.vercel.app
-    #
-    # IMPORTANT: Do not set allow_credentials=True with "*".
     allow_origins=["*"],
     allow_credentials=False,
-
-    # Allow GET/POST/PUT/DELETE and browser OPTIONS preflight requests.
     allow_methods=["*"],
     allow_headers=["*"],
-
-    # Cache successful CORS preflight responses.
     max_age=3600,
 )
 
@@ -64,6 +59,7 @@ maintenance_tasks_collection = db["maintenance_tasks"]
 train_schedule_collection = db["train_schedule"]
 available_blocks_collection = db["available_blocks"]
 assets_collection = db["assets"]
+plans_collection = db["plans"]
 
 
 # ============================================================
@@ -221,6 +217,64 @@ def get_all_operational_data():
 
 
 # ============================================================
+# ROLE-BASED SESSION TOKENS
+# ============================================================
+
+SESSION_SECRET = os.getenv("SESSION_SECRET", "sih-railway-session-2026-change-me")
+
+def _make_session_token(username: str, role: str) -> str:
+    payload = {"username": username, "role": role, "exp": int(time.time()) + 8 * 60 * 60}
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    signature = hmac.new(SESSION_SECRET.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
+
+def _get_current_user(authorization: str | None):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    token = authorization[7:].strip()
+    try:
+        encoded, signature = token.rsplit(".", 1)
+        expected = hmac.new(SESSION_SECRET.encode(), encoded.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError("bad signature")
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+        if int(payload.get("exp", 0)) < int(time.time()):
+            raise ValueError("expired")
+        username = payload.get("username")
+        user = users_collection.find_one({"username": username})
+        if not user:
+            raise ValueError("user missing")
+        return {"username": username, "role": user.get("role", "user")}
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+
+def require_admin(authorization: str | None):
+    user = _get_current_user(authorization)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return user
+
+
+# ============================================================
+# ROLE-BASED AUTHENTICATION
+# ============================================================
+
+class SetupAdminRequest(BaseModel):
+    setup_key: str
+    username: str
+    email: str
+    password: str
+
+class AdminUserRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    role: str = "user"
+
+
+# ============================================================
 # ROOT / HEALTH
 # ============================================================
 
@@ -297,10 +351,17 @@ def login(request: LoginRequest):
                 detail="Invalid username/email or password"
             )
 
+        role = user.get("role", "user")
+        token = _make_session_token(user.get("username"), role)
         return {
             "status": "success",
             "message": "Login successful",
-            "user": user
+            "access_token": token,
+            "user": {
+                "username": user.get("username"),
+                "email": user.get("email"),
+                "role": role
+            }
         }
 
     except HTTPException:
@@ -314,6 +375,77 @@ def login(request: LoginRequest):
             status_code=500,
             detail="Login failed"
         )
+
+
+# ============================================================
+# FIRST ADMIN SETUP
+# ============================================================
+
+@app.post("/auth/setup-admin")
+def setup_admin(request: SetupAdminRequest):
+    expected_key = os.getenv("ADMIN_SETUP_KEY")
+    if not expected_key or not hmac.compare_digest(request.setup_key, expected_key):
+        raise HTTPException(status_code=403, detail="Invalid admin setup key.")
+
+    if users_collection.find_one({"role": "admin"}):
+        raise HTTPException(status_code=409, detail="An admin account already exists.")
+
+    try:
+        user = create_user(request.username, request.email, request.password)
+        users_collection.update_one({"username": request.username.strip()}, {"$set": {"role": "admin"}})
+        return {"status": "success", "message": "Admin account created.", "user": {"username": user["username"], "email": user["email"], "role": "admin"}}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================
+# ADMIN USER MANAGEMENT
+# ============================================================
+
+@app.get("/admin/users")
+def get_admin_users(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    users = []
+    for user in users_collection.find({}, {"password_hash": 0}):
+        users.append(clean_document(user))
+    return {"status": "success", "users": users}
+
+@app.post("/admin/users")
+def create_admin_user(request: AdminUserRequest, authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    if request.role not in {"admin", "user"}:
+        raise HTTPException(status_code=400, detail="Role must be admin or user.")
+    try:
+        user = create_user(request.username, request.email, request.password)
+        users_collection.update_one({"username": user["username"]}, {"$set": {"role": request.role}})
+        return {"status": "success", "message": "User created successfully.", "user": {**user, "role": request.role}}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.put("/admin/users/{username}/role")
+def update_user_role(username: str, role: str, authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    if role not in {"admin", "user"}:
+        raise HTTPException(status_code=400, detail="Role must be admin or user.")
+    if role != "admin" and users_collection.count_documents({"role": "admin"}) <= 1 and users_collection.find_one({"username": username, "role": "admin"}):
+        raise HTTPException(status_code=400, detail="At least one admin account must remain.")
+    result = users_collection.update_one({"username": username}, {"$set": {"role": role}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"status": "success", "message": "User role updated."}
+
+@app.delete("/admin/users/{username}")
+def delete_admin_user(username: str, authorization: str | None = Header(default=None)):
+    admin = require_admin(authorization)
+    if username == admin["username"]:
+        raise HTTPException(status_code=400, detail="You cannot delete your own admin account.")
+    target = users_collection.find_one({"username": username})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if target.get("role") == "admin" and users_collection.count_documents({"role": "admin"}) <= 1:
+        raise HTTPException(status_code=400, detail="At least one admin account must remain.")
+    users_collection.delete_one({"username": username})
+    return {"status": "success", "message": "User deleted."}
 
 
 # ============================================================
@@ -380,8 +512,11 @@ def get_tasks():
 
 @app.post("/tasks")
 def add_task(
-    request: MaintenanceTaskRequest
+    request: MaintenanceTaskRequest,
+    authorization: str | None = Header(default=None)
 ):
+
+    current_user = _get_current_user(authorization) if authorization else {"username": "unknown", "role": "user"}
 
     try:
 
@@ -397,6 +532,7 @@ def add_task(
             )
 
         document = request.model_dump()
+        document["submitted_by"] = current_user["username"]
 
         maintenance_tasks_collection.insert_one(
             document
@@ -424,8 +560,11 @@ def add_task(
 @app.put("/tasks/{task_id}")
 def update_task(
     task_id: str,
-    request: MaintenanceTaskRequest
+    request: MaintenanceTaskRequest,
+    authorization: str | None = Header(default=None)
 ):
+
+    require_admin(authorization)
 
     try:
 
@@ -462,7 +601,9 @@ def update_task(
 
 
 @app.delete("/tasks/{task_id}")
-def delete_task(task_id: str):
+def delete_task(task_id: str, authorization: str | None = Header(default=None)):
+
+    require_admin(authorization)
 
     try:
 
@@ -529,7 +670,11 @@ def get_trains():
 @app.post("/trains")
 def add_train(
     request: TrainScheduleRequest
+,
+    authorization: str | None = Header(default=None)
 ):
+
+    require_admin(authorization)
 
     try:
 
@@ -573,7 +718,11 @@ def add_train(
 def update_train(
     train_id: str,
     request: TrainScheduleRequest
+,
+    authorization: str | None = Header(default=None)
 ):
+
+    require_admin(authorization)
 
     try:
 
@@ -610,7 +759,11 @@ def update_train(
 
 
 @app.delete("/trains/{train_id}")
-def delete_train(train_id: str):
+def delete_train(train_id: str,
+    authorization: str | None = Header(default=None)
+):
+
+    require_admin(authorization)
 
     try:
 
@@ -677,7 +830,11 @@ def get_blocks():
 @app.post("/blocks")
 def add_block(
     request: AvailableBlockRequest
+,
+    authorization: str | None = Header(default=None)
 ):
+
+    require_admin(authorization)
 
     try:
 
@@ -721,7 +878,11 @@ def add_block(
 def update_block(
     block_id: str,
     request: AvailableBlockRequest
+,
+    authorization: str | None = Header(default=None)
 ):
+
+    require_admin(authorization)
 
     try:
 
@@ -758,7 +919,11 @@ def update_block(
 
 
 @app.delete("/blocks/{block_id}")
-def delete_block(block_id: str):
+def delete_block(block_id: str,
+    authorization: str | None = Header(default=None)
+):
+
+    require_admin(authorization)
 
     try:
 
@@ -825,7 +990,11 @@ def get_assets():
 @app.post("/assets")
 def add_asset(
     request: AssetRequest
+,
+    authorization: str | None = Header(default=None)
 ):
+
+    require_admin(authorization)
 
     try:
 
@@ -869,7 +1038,11 @@ def add_asset(
 def update_asset(
     asset_id: str,
     request: AssetRequest
+,
+    authorization: str | None = Header(default=None)
 ):
+
+    require_admin(authorization)
 
     try:
 
@@ -906,7 +1079,11 @@ def update_asset(
 
 
 @app.delete("/assets/{asset_id}")
-def delete_asset(asset_id: str):
+def delete_asset(asset_id: str,
+    authorization: str | None = Header(default=None)
+):
+
+    require_admin(authorization)
 
     try:
 
@@ -945,8 +1122,11 @@ def delete_asset(asset_id: str):
 
 @app.post("/upload-excel")
 async def upload_excel(
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None)
 ):
+
+    require_admin(authorization)
 
     try:
 
@@ -1892,7 +2072,9 @@ def add_ai_confidence(result, tasks, blocks):
 # ============================================================
 
 @app.get("/generate-plan")
-def generate_maintenance_plan():
+def generate_maintenance_plan(authorization: str | None = Header(default=None)):
+
+    require_admin(authorization)
 
     try:
 
@@ -1926,6 +2108,15 @@ def generate_maintenance_plan():
             blocks
         )
 
+        # Store every admin-generated plan so it can be reviewed and approved.
+        plan_document = dict(result)
+        plan_document["status"] = "PENDING_APPROVAL"
+        plan_document["created_by"] = _get_current_user(authorization)["username"]
+        plan_document["created_at"] = datetime.now(timezone.utc).isoformat()
+        inserted = plans_collection.insert_one(plan_document)
+        result["plan_id"] = str(inserted.inserted_id)
+        result["approval_status"] = "PENDING_APPROVAL"
+
         return result
 
 
@@ -1945,3 +2136,37 @@ def generate_maintenance_plan():
             "plan": [],
             "error": str(e)
         }
+
+# ============================================================
+# PLAN REVIEW / APPROVAL
+# ============================================================
+
+@app.get("/plans/latest")
+def get_latest_approved_plan(authorization: str | None = Header(default=None)):
+    _get_current_user(authorization)
+    document = plans_collection.find_one({"status": "APPROVED"}, sort=[("created_at", -1)])
+    if not document:
+        return {"status": "success", "plan": None}
+    return {"status": "success", "plan": clean_document(document)}
+
+@app.get("/admin/plans/latest")
+def get_latest_plan_for_admin(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    document = plans_collection.find_one({}, sort=[("created_at", -1)])
+    if not document:
+        return {"status": "success", "plan": None}
+    return {"status": "success", "plan": clean_document(document)}
+
+@app.put("/admin/plans/{plan_id}/approve")
+def approve_plan(plan_id: str, authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    try:
+        result = plans_collection.update_one(
+            {"_id": ObjectId(plan_id)},
+            {"$set": {"status": "APPROVED", "approved_by": _get_current_user(authorization)["username"], "approved_at": datetime.now(timezone.utc).isoformat()}}
+        )
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid plan ID.")
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Plan not found.")
+    return {"status": "success", "message": "Plan approved successfully."}

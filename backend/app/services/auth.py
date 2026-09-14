@@ -1,12 +1,16 @@
 import os
 import hashlib
 import secrets
-from typing import Optional
 from pathlib import Path
 
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
+
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 ENV_FILE = BACKEND_DIR / ".env"
@@ -14,7 +18,10 @@ ENV_FILE = BACKEND_DIR / ".env"
 load_dotenv(ENV_FILE)
 
 MONGO_URL = os.getenv("MONGO_URL")
-MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "sih2026")
+MONGODB_DATABASE = os.getenv(
+    "MONGODB_DATABASE",
+    "sih2026"
+)
 
 if not MONGO_URL:
     raise RuntimeError(
@@ -22,7 +29,11 @@ if not MONGO_URL:
         f"Expected .env file at: {ENV_FILE}"
     )
 
-# Reusable MongoDB client
+
+# ============================================================
+# MONGODB
+# ============================================================
+
 client = MongoClient(
     MONGO_URL,
     serverSelectionTimeoutMS=5000,
@@ -34,152 +45,223 @@ client = MongoClient(
 )
 
 db = client[MONGODB_DATABASE]
-
 users_collection = db["users"]
 
-# Create indexes once
-users_collection.create_index("username", unique=True)
+
+# ============================================================
+# INDEXES
+# ============================================================
+
+users_collection.create_index(
+    "username",
+    unique=True
+)
 
 users_collection.create_index(
     "email",
     unique=True,
-    partialFilterExpression={"email": {"$type": "string"}}
+    partialFilterExpression={
+        "email": {"$type": "string"}
+    }
 )
 
 
+# ============================================================
+# DATABASE CHECK
+# ============================================================
+
 def check_database_connection():
-    """
-    Quickly check whether MongoDB is reachable.
-    Prevents requests from hanging for a very long time.
-    """
     try:
         client.admin.command("ping")
         return True
-    except Exception as e:
-        print("MONGODB CONNECTION ERROR:", repr(e))
+    except Exception as error:
+        print(
+            "MONGODB CONNECTION ERROR:",
+            repr(error)
+        )
         return False
 
 
+# ============================================================
+# PASSWORD HASHING
+# ============================================================
+
 def hash_password(password: str) -> str:
+    """
+    PBKDF2-HMAC-SHA256 password hashing.
+    The stored value contains the salt and iteration count.
+    """
+
+    iterations = 310000
     salt = secrets.token_bytes(16)
 
     password_hash = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
         salt,
-        120000
+        iterations,
     )
 
-    return salt.hex() + ":" + password_hash.hex()
+    return (
+        f"pbkdf2_sha256$"
+        f"{iterations}$"
+        f"{salt.hex()}$"
+        f"{password_hash.hex()}"
+    )
 
 
-def verify_password(password: str, stored_hash: str) -> bool:
+def verify_password(
+    password: str,
+    stored_hash: str
+) -> bool:
+
     try:
-        salt_hex, hash_hex = stored_hash.split(":")
+        scheme, iterations, salt_hex, hash_hex = (
+            stored_hash.split("$")
+        )
 
-        salt = bytes.fromhex(salt_hex)
-        original_hash = bytes.fromhex(hash_hex)
+        if scheme != "pbkdf2_sha256":
+            return False
 
-        new_hash = hashlib.pbkdf2_hmac(
+        iterations = int(iterations)
+
+        calculated = hashlib.pbkdf2_hmac(
             "sha256",
             password.encode("utf-8"),
-            salt,
-            120000
+            bytes.fromhex(salt_hex),
+            iterations,
         )
 
         return secrets.compare_digest(
-            new_hash,
-            original_hash
+            calculated.hex(),
+            hash_hex,
         )
 
-    except (ValueError, TypeError):
+    except Exception as error:
+        print(
+            "PASSWORD VERIFY ERROR:",
+            repr(error)
+        )
         return False
 
 
-def create_user(username: str, email: str, password: str):
+# ============================================================
+# CREATE USER
+# ============================================================
 
+def create_user(
+    username: str,
+    email: str,
+    password: str
+):
     username = username.strip()
     email = email.strip().lower()
 
     if not username:
-        raise ValueError("Username is required")
-
-    if not email:
-        raise ValueError("Email is required")
-
-    if not password:
-        raise ValueError("Password is required")
-
-    if len(password) < 6:
-        raise ValueError("Password must be at least 6 characters")
-
-    # Check MongoDB before doing password hashing
-    if not check_database_connection():
-        raise RuntimeError(
-            "Database is temporarily unavailable. Please try again."
+        raise ValueError(
+            "Username is required."
         )
 
-    # Check existing username
-    if users_collection.find_one(
-        {"username": username},
-        {"_id": 1}
-    ):
-        raise ValueError("Username already exists")
+    if len(username) < 3:
+        raise ValueError(
+            "Username must contain at least 3 characters."
+        )
 
-    # Check existing email
-    if users_collection.find_one(
-        {"email": email},
-        {"_id": 1}
-    ):
-        raise ValueError("Email already registered")
+    if not email:
+        raise ValueError(
+            "Email is required."
+        )
 
-    # Hash only after validation/database checks
+    if not password:
+        raise ValueError(
+            "Password is required."
+        )
+
+    if len(password) < 6:
+        raise ValueError(
+            "Password must contain at least 6 characters."
+        )
+
+    if not check_database_connection():
+        raise RuntimeError(
+            "Unable to connect to MongoDB."
+        )
+
+    existing_username = (
+        users_collection.find_one(
+            {"username": username}
+        )
+    )
+
+    if existing_username:
+        raise ValueError(
+            "Username already exists."
+        )
+
+    existing_email = (
+        users_collection.find_one(
+            {"email": email}
+        )
+    )
+
+    if existing_email:
+        raise ValueError(
+            "Email already exists."
+        )
+
     password_hash = hash_password(password)
 
-    user = {
+    document = {
         "username": username,
         "email": email,
-        "password_hash": password_hash
+        "password_hash": password_hash,
     }
 
     try:
+        result = users_collection.insert_one(
+            document
+        )
 
-        result = users_collection.insert_one(user)
+        print(
+            "USER CREATED:",
+            username,
+            result.inserted_id
+        )
 
     except DuplicateKeyError:
-
         raise ValueError(
-            "Username or email already exists"
+            "Username or email already exists."
         )
 
     return {
-        "id": str(result.inserted_id),
         "username": username,
-        "email": email
+        "email": email,
     }
 
+
+# ============================================================
+# AUTHENTICATE USER
+# ============================================================
 
 def authenticate_user(
     username_or_email: str,
     password: str
-) -> Optional[dict]:
+):
+    value = username_or_email.strip()
 
-    login_value = username_or_email.strip()
-
-    if not login_value or not password:
+    if not value or not password:
         return None
 
-    # Check database availability first
     if not check_database_connection():
         raise RuntimeError(
-            "Database is temporarily unavailable. Please try again."
+            "Unable to connect to MongoDB."
         )
 
     user = users_collection.find_one(
         {
             "$or": [
-                {"username": login_value},
-                {"email": login_value.lower()}
+                {"username": value},
+                {"email": value.lower()},
             ]
         }
     )
@@ -187,17 +269,20 @@ def authenticate_user(
     if not user:
         return None
 
-    if "password_hash" not in user:
+    stored_hash = user.get(
+        "password_hash"
+    )
+
+    if not stored_hash:
         return None
 
     if not verify_password(
         password,
-        user["password_hash"]
+        stored_hash
     ):
         return None
 
     return {
-        "id": str(user["_id"]),
-        "username": user["username"],
-        "email": user.get("email", "")
+        "username": user.get("username"),
+        "email": user.get("email"),
     }

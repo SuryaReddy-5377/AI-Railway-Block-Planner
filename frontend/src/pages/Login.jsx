@@ -12,12 +12,16 @@ function Login() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const handleLogin = async (e) => {
-    e.preventDefault();
+  const handleLogin = async (event) => {
+    event.preventDefault();
+
+    if (loading) return;
 
     setError("");
 
-    if (!username.trim()) {
+    const loginValue = username.trim();
+
+    if (!loginValue) {
       setError("Please enter your username or email.");
       return;
     }
@@ -29,37 +33,50 @@ function Login() {
 
     setLoading(true);
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/auth/login`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          username: username.trim(),
-          password: password,
-        }),
-      });
+    const controller = new AbortController();
 
-      const contentType = response.headers.get("content-type");
+    const timeoutId = window.setTimeout(() => {
+      controller.abort();
+    }, 20000);
+
+    try {
+      console.log("LOGIN: sending request...");
+
+      const response = await fetch(
+        `${API_BASE_URL}/auth/login`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            username: loginValue,
+            password,
+          }),
+          signal: controller.signal,
+        }
+      );
+
+      window.clearTimeout(timeoutId);
+
+      const contentType =
+        response.headers.get("content-type") || "";
 
       let data;
 
-      if (contentType && contentType.includes("application/json")) {
+      if (contentType.includes("application/json")) {
         data = await response.json();
       } else {
         data = await response.text();
       }
 
+      console.log("LOGIN STATUS:", response.status);
       console.log("LOGIN RESPONSE:", data);
 
-      // -----------------------------
-      // LOGIN FAILED
-      // -----------------------------
       if (!response.ok) {
         let message = "Login failed.";
 
-        if (typeof data === "string") {
+        if (typeof data === "string" && data.trim()) {
           message = data;
         } else if (data?.detail) {
           message =
@@ -74,43 +91,69 @@ function Login() {
         }
 
         setError(message);
-        setLoading(false);
         return;
       }
 
-      // -----------------------------
-      // LOGIN SUCCESSFUL
-      // -----------------------------
-
       console.log("LOGIN SUCCESSFUL");
 
-      // Save login information
-      localStorage.setItem("isLoggedIn", "true");
-      localStorage.setItem("username", username.trim());
+      /*
+       * IMPORTANT:
+       * Use sessionStorage, not localStorage.
+       * Closing the browser/tab will require login again.
+       * Refreshing the page during the same session keeps login.
+       */
+      sessionStorage.setItem("isLoggedIn", "true");
 
-      // Save token if backend provides one
+      const returnedUsername =
+        data?.user?.username || loginValue;
+
+      sessionStorage.setItem(
+        "username",
+        String(returnedUsername)
+      );
+
       if (data?.access_token) {
-        localStorage.setItem("token", data.access_token);
+        sessionStorage.setItem(
+          "token",
+          data.access_token
+        );
       }
 
       if (data?.token) {
-        localStorage.setItem("token", data.token);
+        sessionStorage.setItem(
+          "token",
+          data.token
+        );
       }
 
       /*
-       * IMPORTANT
-       *
-       * We wait until the backend confirms the login,
-       * then navigate to the dashboard.
+       * Remove old persistent login values created by
+       * previous versions of the application.
        */
-     window.location.replace("/dashboard");
+      localStorage.removeItem("isLoggedIn");
+      localStorage.removeItem("username");
+      localStorage.removeItem("token");
+      localStorage.removeItem("access_token");
 
+      /*
+       * Full navigation makes the new session state available
+       * immediately to App.jsx.
+       */
+      window.location.replace("/dashboard");
     } catch (err) {
+      window.clearTimeout(timeoutId);
+
       console.error("LOGIN ERROR:", err);
 
-      setError(
-        "Unable to connect to the backend. Make sure your FastAPI server is running."
-      );
+      if (err?.name === "AbortError") {
+        setError(
+          "The server took too long to respond. Please try again."
+        );
+      } else {
+        setError(
+          "Unable to connect to the backend. Please try again."
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -121,96 +164,73 @@ function Login() {
       <div className="auth-overlay"></div>
 
       <div className="auth-card">
+        <div className="auth-logo">🚆</div>
 
-        {/* Logo */}
-        <div className="auth-logo">
-          🚆
-        </div>
-
-        {/* Main title */}
         <h1>AI Railway Block Planner</h1>
 
         <p className="auth-system-title">
           Railway Maintenance Management System
         </p>
 
-        {/* Welcome */}
-        <h2>Welcome Back</h2>
+        <h2>Sign In</h2>
 
         <p className="auth-description">
-          Sign in to continue to your railway operations portal.
+          Sign in to access railway maintenance planning.
         </p>
 
         <form onSubmit={handleLogin}>
-
-          {/* Username */}
           <div className="form-group">
-
             <label htmlFor="username">
               Username or Email
             </label>
 
             <div className="input-wrapper">
-
-              <span className="input-icon">
-                👤
-              </span>
+              <span className="input-icon">👤</span>
 
               <input
                 id="username"
                 name="username"
                 type="text"
                 value={username}
-                onChange={(e) => {
-                  setUsername(e.target.value);
+                onChange={(event) => {
+                  setUsername(event.target.value);
                   setError("");
                 }}
                 placeholder="Enter username or email"
                 autoComplete="username"
+                disabled={loading}
               />
-
             </div>
-
           </div>
 
-          {/* Password */}
           <div className="form-group">
-
-            <label htmlFor="password">
-              Password
-            </label>
+            <label htmlFor="password">Password</label>
 
             <div className="input-wrapper">
-
-              <span className="input-icon">
-                🔒
-              </span>
+              <span className="input-icon">🔒</span>
 
               <input
                 id="password"
                 name="password"
                 type="password"
                 value={password}
-                onChange={(e) => {
-                  setPassword(e.target.value);
+                onChange={(event) => {
+                  setPassword(event.target.value);
                   setError("");
                 }}
                 placeholder="Enter password"
                 autoComplete="current-password"
+                disabled={loading}
               />
-
             </div>
-
           </div>
 
-          {/* Error */}
           {error && (
             <div className="auth-error">
               {error}
             </div>
           )}
 
-          {/* Login button */}
           <button
             type="submit"
             className="auth-button"
@@ -218,21 +238,16 @@ function Login() {
           >
             {loading ? "Signing In..." : "🔒 Sign In"}
           </button>
-
         </form>
 
-        {/* Register */}
         <p className="auth-switch">
           New user?{" "}
-          <Link to="/register">
-            Register
-          </Link>
+          <Link to="/register">Register</Link>
         </p>
 
         <div className="auth-footer">
           Secure Railway Operations Portal
         </div>
-
       </div>
     </div>
   );

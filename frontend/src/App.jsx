@@ -168,10 +168,10 @@ function App() {
 
     } catch (err) {
       console.error(err);
-      setError(
-        err.message ||
-          "Unable to load railway data."
-      );
+      console.warn(
+  "Unable to refresh statistics:",
+  err
+);
     }
   };
 
@@ -232,10 +232,10 @@ function App() {
 
       setRecords([]);
 
-      setError(
-        err.message ||
-          "Unable to load records."
-      );
+     console.warn(
+  "Unable to refresh records:",
+  err
+);
     } finally {
       setManagerLoading(false);
     }
@@ -328,119 +328,106 @@ function App() {
   // --------------------------------------------------
 
   const saveData = async (event) => {
-    event.preventDefault();
+  event.preventDefault();
 
-    if (!manager) {
-      return;
+  if (!manager || saving) {
+    return;
+  }
+
+  setSaving(true);
+  setError("");
+  setMessage("");
+
+  try {
+    const payload = {
+      ...form,
+    };
+
+    if (manager === "tasks" || manager === "blocks") {
+      payload.duration_hours = Number(payload.duration_hours);
     }
 
-    setSaving(true);
-    setError("");
-    setMessage("");
+    const isEditing = editingId !== null;
+
+    const url = isEditing
+      ? `${API_URL}${URLS[manager]}/${encodeURIComponent(editingId)}`
+      : `${API_URL}${URLS[manager]}`;
+
+    const response = await fetch(url, {
+      method: isEditing ? "PUT" : "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const text = await response.text();
+
+    if (!response.ok) {
+      let detail = text;
+
+      try {
+        const parsed = JSON.parse(text);
+        detail = parsed.detail || parsed.message || text;
+      } catch {}
+
+      throw new Error(
+        detail || "Backend rejected the data."
+      );
+    }
+
+    // ==========================================
+    // SAVE WAS SUCCESSFUL
+    // ==========================================
+
+    // Clear form immediately
+    setForm({
+      ...EMPTY[manager],
+    });
+
+    setEditingId(null);
+
+    // Show success immediately
+    setMessage(
+      isEditing
+        ? "✅ Data updated successfully."
+        : "✅ Data added successfully."
+    );
+
+    // ==========================================
+    // REFRESH DATA SEPARATELY
+    // ==========================================
 
     try {
-      const payload = {
-        ...form,
-      };
-
-      if (
-        manager === "tasks" ||
-        manager === "blocks"
-      ) {
-        payload.duration_hours =
-          Number(payload.duration_hours);
-      }
-
-      const isEditing =
-        editingId !== null;
-
-      const url = isEditing
-        ? `${API_URL}${URLS[manager]}/${encodeURIComponent(
-            editingId
-          )}`
-        : `${API_URL}${URLS[manager]}`;
-
-      const response = await fetch(
-        url,
-        {
-          method: isEditing
-            ? "PUT"
-            : "POST",
-
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
-
-          body: JSON.stringify(
-            payload
-          ),
-        }
-      );
-
-      const text =
-        await response.text();
-
-      if (!response.ok) {
-        let detail = text;
-
-        try {
-          const parsed =
-            JSON.parse(text);
-
-          detail =
-            parsed.detail ||
-            parsed.message ||
-            text;
-        } catch {}
-
-        throw new Error(
-          detail ||
-            "Backend rejected the data."
-        );
-      }
-
-      /*
-       * SUCCESS
-       *
-       * First clear the form.
-       */
-      setForm({
-        ...EMPTY[manager],
-      });
-
-      setEditingId(null);
-
-  
-      setMessage(
-        isEditing
-          ? "Data updated successfully."
-          : "Data added successfully."
-      );
-
-      /*
-       * Immediately reload the table.
-       * The new record should appear here.
-       */
       await loadRecords(manager);
-
-      /*
-       * Update dashboard counters.
-       */
-      await loadStats();
-
-    } catch (err) {
-      console.error(err);
-
-      setError(
-        err.message ||
-          "Unable to save data."
+    } catch (refreshError) {
+      console.warn(
+        "Record refresh failed after successful save:",
+        refreshError
       );
-
-    } finally {
-      setSaving(false);
     }
-  };
+
+    try {
+      await loadStats();
+    } catch (refreshError) {
+      console.warn(
+        "Stats refresh failed after successful save:",
+        refreshError
+      );
+    }
+
+  } catch (err) {
+    console.error("SAVE ERROR:", err);
+
+    setError(
+      err.message || "Unable to save data."
+    );
+
+    setMessage("");
+  } finally {
+    setSaving(false);
+  }
+};
 
   // --------------------------------------------------
   // EDIT

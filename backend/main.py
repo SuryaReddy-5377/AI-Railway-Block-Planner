@@ -1,5 +1,7 @@
 from pathlib import Path
 from io import BytesIO
+from datetime import datetime
+import re
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, UploadFile, File
@@ -11,7 +13,6 @@ from bson import ObjectId
 # Load .env BEFORE importing auth.py
 load_dotenv()
 
-from app.services.block_planner import generate_plan
 from app.services.auth import (
     create_user,
     authenticate_user,
@@ -1066,7 +1067,6 @@ async def upload_excel(
 
         train_required = [
             "train_id",
-            "train_name",
             "section",
             "arrival_time",
             "departure_time"
@@ -1147,6 +1147,14 @@ async def upload_excel(
         trains_df = trains_df.fillna("")
         blocks_df = blocks_df.fillna("")
         assets_df = assets_df.fillna("")
+
+        # The starter SIH workbook uses train_type instead of train_name.
+        # Keep both formats compatible by deriving train_name when needed.
+        if "train_name" not in trains_df.columns:
+            if "train_type" in trains_df.columns:
+                trains_df["train_name"] = trains_df["train_type"].astype(str)
+            else:
+                trains_df["train_name"] = trains_df["train_id"].astype(str)
 
 
         # ----------------------------------------------------
@@ -1358,6 +1366,420 @@ async def upload_excel(
         )
 
 
+
+# ============================================================
+# FAST AI-ASSISTED BLOCK OPTIMIZATION
+# ============================================================
+
+def _text(value):
+    return str(value if value is not None else "").strip()
+
+
+def _time_minutes(value):
+    """
+    Convert HH:MM (or a value containing HH:MM) to minutes.
+    Returns None for invalid/empty values.
+    """
+    match = re.search(r"(\d{1,2}):(\d{2})", _text(value))
+    if not match:
+        return None
+
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+
+    if hour > 23 or minute > 59:
+        return None
+
+    return hour * 60 + minute
+
+
+def _interval(value_start, value_end):
+    start = _time_minutes(value_start)
+    end = _time_minutes(value_end)
+
+    if start is None or end is None:
+        return None
+
+    # Support an interval crossing midnight.
+    if end <= start:
+        end += 24 * 60
+
+    return start, end
+
+
+def _overlaps(first, second):
+    if not first or not second:
+        return False
+
+    first_start, first_end = first
+    second_start, second_end = second
+
+    return first_start < second_end and second_start < first_end
+
+
+def _priority_score(value):
+    return {
+        "critical": 100,
+        "high": 80,
+        "medium": 55,
+        "low": 30,
+    }.get(_text(value).lower(), 40)
+
+
+def _condition_score(value):
+    return {
+        "critical": 100,
+        "poor": 75,
+        "fair": 45,
+        "good": 20,
+    }.get(_text(value).lower(), 20)
+
+
+def _required_block_matches(task, block):
+    required = _text(task.get("required_block_type", "Normal")).lower()
+    block_type = _text(block.get("block_type", "Normal")).lower()
+
+    # "Normal" means that the task does not require a
+    # department-specific block type.
+    if not required or required == "normal":
+        return True
+
+    if required == block_type:
+        return True
+
+    # Accept common railway naming variants.
+    aliases = {
+        "power": {"power", "ohe", "ohe block", "power block"},
+        "traffic": {"traffic", "traffic block", "signal block"},
+        "normal": {"normal", "track", "track block"},
+    }
+
+    if required in aliases and block_type in aliases[required]:
+        return True
+
+    asset_type = _text(task.get("asset_type")).lower()
+
+    if required in {"power", "ohe", "ohe block"}:
+        return asset_type in {"ohe", "traction", "overhead_equipment"} and (
+            "ohe" in block_type or "power" in block_type
+        )
+
+    if required in {"traffic", "traffic block", "signal block"}:
+        return asset_type in {"signal", "point_machine"} and (
+            "signal" in block_type or "traffic" in block_type
+        )
+
+    if required in {"track", "track block"}:
+        return asset_type in {"track", "bridge"} and "track" in block_type
+
+    return False
+
+
+def _task_due_score(task):
+    """
+    Small urgency component. Invalid/missing dates simply contribute 0.
+    """
+    due = _text(task.get("due_date"))
+
+    if not due:
+        return 0
+
+    try:
+        due_timestamp = pd.to_datetime(due, errors="coerce")
+        if pd.isna(due_timestamp):
+            return 0
+
+        days = max((due_timestamp.to_pydatetime() - datetime.now()).total_seconds() / 86400, -30)
+
+        if days <= 0:
+            return 25
+        if days <= 1:
+            return 20
+        if days <= 3:
+            return 15
+        if days <= 7:
+            return 8
+
+    except Exception:
+        return 0
+
+    return 0
+
+
+def fast_generate_plan(tasks, blocks, trains, assets):
+    """
+    Lightweight optimization engine for the live dashboard.
+
+    It uses:
+      1. maintenance priority,
+      2. asset condition,
+      3. due-date urgency,
+      4. section compatibility,
+      5. required block type,
+      6. duration capacity,
+      7. train movement conflicts,
+      8. block reuse prevention,
+      9. minimum-waste block selection.
+
+    This is intentionally deterministic so the web request completes
+    quickly even when the dataset becomes larger.
+    """
+
+    if tasks is None or tasks.empty:
+        return {
+            "status": "success",
+            "planned_tasks": 0,
+            "unplanned_tasks": 0,
+            "total_tasks": 0,
+            "planning_efficiency": 0,
+            "plan": [],
+        }
+
+    tasks_records = tasks.fillna("").to_dict(orient="records")
+    blocks_records = (
+        blocks.fillna("").to_dict(orient="records")
+        if blocks is not None and not blocks.empty
+        else []
+    )
+    train_records = (
+        trains.fillna("").to_dict(orient="records")
+        if trains is not None and not trains.empty
+        else []
+    )
+    asset_records = (
+        assets.fillna("").to_dict(orient="records")
+        if assets is not None and not assets.empty
+        else []
+    )
+
+    train_intervals = []
+
+    for train in train_records:
+        interval = _interval(
+            train.get("arrival_time"),
+            train.get("departure_time"),
+        )
+
+        if interval:
+            train_intervals.append(
+                (
+                    _text(train.get("section")).upper(),
+                    interval,
+                )
+            )
+
+    assets_by_key = {}
+
+    for asset in asset_records:
+        key = (
+            _text(asset.get("asset_type")).lower(),
+            _text(asset.get("section")).upper(),
+        )
+        assets_by_key.setdefault(key, []).append(asset)
+
+    # Highest operational importance first.
+    ordered_tasks = sorted(
+        tasks_records,
+        key=lambda task: (
+            -(
+                _priority_score(task.get("priority"))
+                + _condition_score(task.get("condition"))
+                + _task_due_score(task)
+            ),
+            _text(task.get("due_date")),
+            _text(task.get("task_id")),
+        ),
+    )
+
+    candidate_blocks = []
+
+    for block in blocks_records:
+        status = _text(block.get("status", "Available")).lower()
+
+        if status not in {"", "available"}:
+            continue
+
+        interval = _interval(
+            block.get("start_time"),
+            block.get("end_time"),
+        )
+
+        if not interval:
+            continue
+
+        try:
+            duration = float(block.get("duration_hours") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+
+        if duration <= 0:
+            duration = (interval[1] - interval[0]) / 60
+
+        candidate_blocks.append(
+            {
+                **block,
+                "_interval": interval,
+                "_duration": duration,
+            }
+        )
+
+    # Earlier windows are considered first only after task priority.
+    candidate_blocks.sort(
+        key=lambda block: (
+            _text(block.get("section")).upper(),
+            block["_interval"][0],
+        )
+    )
+
+    used_blocks = set()
+    plan_rows = []
+
+    for task in ordered_tasks:
+        task_id = _text(task.get("task_id"))
+        task_section = _text(task.get("section")).upper()
+
+        try:
+            task_duration = float(task.get("duration_hours") or 0)
+        except (TypeError, ValueError):
+            task_duration = 0
+
+        best = None
+
+        for block in candidate_blocks:
+            block_id = _text(block.get("block_id"))
+
+            if not block_id or block_id in used_blocks:
+                continue
+
+            block_section = _text(block.get("section")).upper()
+
+            if task_section and block_section and task_section != block_section:
+                continue
+
+            if task_duration <= 0 or block["_duration"] + 1e-9 < task_duration:
+                continue
+
+            if not _required_block_matches(task, block):
+                continue
+
+            # A maintenance block cannot overlap a scheduled train
+            # movement in the same section.
+            conflict = False
+
+            for train_section, train_interval in train_intervals:
+                if (
+                    task_section
+                    and train_section
+                    and task_section == train_section
+                    and _overlaps(block["_interval"], train_interval)
+                ):
+                    conflict = True
+                    break
+
+            if conflict:
+                continue
+
+            slack = max(block["_duration"] - task_duration, 0)
+
+            # Prefer less wasted block time, then earlier windows.
+            score = (
+                (_priority_score(task.get("priority")) * 10)
+                + (_condition_score(task.get("condition")) * 5)
+                + (_task_due_score(task) * 3)
+                - (slack * 4)
+                - (block["_interval"][0] / 10000)
+            )
+
+            if best is None or score > best["_score"]:
+                best = {
+                    "block": block,
+                    "_score": score,
+                    "_slack": slack,
+                }
+
+        asset_key = (
+            _text(task.get("asset_type")).lower(),
+            task_section,
+        )
+
+        matching_assets = assets_by_key.get(asset_key, [])
+
+        selected_asset = None
+
+        if matching_assets:
+            selected_asset = sorted(
+                matching_assets,
+                key=lambda asset: -_condition_score(
+                    asset.get("condition")
+                ),
+            )[0]
+
+        base_row = {
+            "task_id": task_id,
+            "department": task.get("department", ""),
+            "asset_type": task.get("asset_type", ""),
+            "section": task.get("section", ""),
+            "maintenance_type": task.get("maintenance_type", ""),
+            "duration_hours": task_duration,
+            "priority": task.get("priority", ""),
+            "due_date": task.get("due_date", ""),
+            "condition": task.get("condition", ""),
+            "asset_id": selected_asset.get("asset_id", "") if selected_asset else "",
+            "asset_condition": selected_asset.get("condition", "") if selected_asset else "",
+        }
+
+        if best:
+            block = best["block"]
+            used_blocks.add(_text(block.get("block_id")))
+
+            plan_rows.append(
+                {
+                    **base_row,
+                    "recommended_block": block.get("block_id", ""),
+                    "block_start": block.get("start_time", ""),
+                    "block_end": block.get("end_time", ""),
+                    "status": "PLANNED",
+                    "reason": (
+                        "Selected by priority-aware optimization after "
+                        "section, block-type, duration and train-conflict checks."
+                    ),
+                }
+            )
+        else:
+            plan_rows.append(
+                {
+                    **base_row,
+                    "recommended_block": None,
+                    "block_start": None,
+                    "block_end": None,
+                    "status": "UNPLANNED",
+                    "reason": (
+                        "No feasible unused maintenance block remained "
+                        "after section, block-type, duration and train-conflict checks."
+                    ),
+                }
+            )
+
+    planned_count = sum(
+        1 for row in plan_rows if row.get("status") == "PLANNED"
+    )
+    total_count = len(plan_rows)
+    unplanned_count = total_count - planned_count
+
+    return {
+        "status": "success",
+        "planned_tasks": planned_count,
+        "unplanned_tasks": unplanned_count,
+        "total_tasks": total_count,
+        "planning_efficiency": (
+            round((planned_count / total_count) * 100, 2)
+            if total_count
+            else 0
+        ),
+        "plan": plan_rows,
+    }
+
+
 # ============================================================
 # AI DECISION CONFIDENCE
 # ============================================================
@@ -1483,10 +1905,11 @@ def generate_maintenance_plan():
             }
 
 
-        result = generate_plan(
+        result = fast_generate_plan(
             tasks,
             blocks,
-            trains
+            trains,
+            assets
         )
 
         result = add_ai_confidence(

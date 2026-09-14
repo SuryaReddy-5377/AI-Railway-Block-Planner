@@ -36,10 +36,23 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+
+    # This project uses sessionStorage on the frontend rather than
+    # browser cookies, so API requests do not need credentialed CORS.
+    #
+    # Allowing all origins here also fixes Vercel preview URLs such as:
+    # https://frontend-i5ihw38ry-surya-manohar-reddy-s-projects.vercel.app
+    #
+    # IMPORTANT: Do not set allow_credentials=True with "*".
     allow_origins=["*"],
     allow_credentials=False,
+
+    # Allow GET/POST/PUT/DELETE and browser OPTIONS preflight requests.
     allow_methods=["*"],
     allow_headers=["*"],
+
+    # Cache successful CORS preflight responses.
+    max_age=3600,
 )
 
 

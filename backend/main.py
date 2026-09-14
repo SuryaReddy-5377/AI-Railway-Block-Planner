@@ -1,21 +1,14 @@
-from pathlib import Path
-
-import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from dotenv import load_dotenv
+from typing import Optional
+import pandas as pd
+import io
 
-# Load .env BEFORE importing auth.py
-load_dotenv()
+from app.services.auth import db
 
 from app.services.block_planner import generate_plan
-from app.services.auth import create_user, authenticate_user
 
-
-# ============================================================
-# FASTAPI APP
-# ============================================================
 
 app = FastAPI(
     title="AI Railway Block Planner",
@@ -23,394 +16,734 @@ app = FastAPI(
 )
 
 
-# ============================================================
+# =========================================================
 # CORS
-# ============================================================
-
-# ============================================================
-# CORS
-# ============================================================
+# =========================================================
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://frontend-[a-z0-9-]+-surya-manohar-reddy-s-projects\.vercel\.app",
     allow_origins=[
+        "https://frontend-sigma-nine-83.vercel.app",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
+    allow_origin_regex=r"https://frontend-[a-z0-9-]+-surya-manohar-reddy-s-projects\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ============================================================
-# PATHS
-# ============================================================
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR.parent / "data"
+# =========================================================
+# MONGODB COLLECTIONS
+# =========================================================
 
-
-# ============================================================
-# AUTH SCHEMAS
-# ============================================================
-
-class RegisterRequest(BaseModel):
-    username: str
-    email: str
-    password: str
+maintenance_tasks_collection = db["maintenance_tasks"]
+train_schedule_collection = db["train_schedule"]
+available_blocks_collection = db["available_blocks"]
+assets_collection = db["assets"]
 
 
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+# =========================================================
+# MODELS
+# =========================================================
+
+class TaskCreate(BaseModel):
+    task_id: str
+    department: str
+    asset_type: str
+    section: str
+    maintenance_type: str
+    duration_hours: float
+    priority: str
+    due_date: str
+    condition: Optional[str] = "Good"
+    required_block_type: Optional[str] = "Normal"
 
 
-# ============================================================
-# DATA LOADING
-# ============================================================
-
-def find_data_file():
-    possible_files = []
-
-    if DATA_DIR.exists():
-
-        possible_files.extend(DATA_DIR.glob("*.xlsx"))
-        possible_files.extend(DATA_DIR.glob("*.xls"))
-        possible_files.extend(DATA_DIR.glob("*.csv"))
-
-        possible_files.extend(DATA_DIR.rglob("*.xlsx"))
-        possible_files.extend(DATA_DIR.rglob("*.xls"))
-        possible_files.extend(DATA_DIR.rglob("*.csv"))
-
-    # Remove duplicates while preserving order
-    unique_files = []
-
-    for file in possible_files:
-        if file not in unique_files:
-            unique_files.append(file)
-
-    if unique_files:
-        return unique_files[0]
-
-    return None
+class TrainCreate(BaseModel):
+    train_id: str
+    train_name: str
+    section: str
+    arrival_time: str
+    departure_time: str
 
 
-def load_data():
+class BlockCreate(BaseModel):
+    block_id: str
+    section: str
+    start_time: str
+    end_time: str
+    duration_hours: float
+    block_type: Optional[str] = "Normal"
+    status: Optional[str] = "Available"
 
-    data_file = find_data_file()
 
-    if data_file is None:
-        raise FileNotFoundError(
-            f"No dataset found inside {DATA_DIR}"
+class AssetCreate(BaseModel):
+    asset_id: str
+    asset_type: str
+    section: str
+    condition: Optional[str] = "Good"
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def clean_document(doc):
+    if doc and "_id" in doc:
+        doc["_id"] = str(doc["_id"])
+    return doc
+
+
+def replace_collection(collection, documents):
+    collection.delete_many({})
+
+    if documents:
+        collection.insert_many(documents)
+
+
+# =========================================================
+# STARTUP
+# =========================================================
+
+@app.on_event("startup")
+def initialize_database():
+    try:
+        db.command("ping")
+
+        maintenance_tasks_collection.create_index(
+            "task_id",
+            unique=True
         )
 
-    print(f"Loading dataset: {data_file}")
-
-    # ========================================================
-    # EXCEL
-    # ========================================================
-
-    if data_file.suffix.lower() in [".xlsx", ".xls"]:
-
-        workbook = pd.ExcelFile(data_file)
-
-        print("Available sheets:", workbook.sheet_names)
-
-        sheet_names = {
-            sheet.lower().strip(): sheet
-            for sheet in workbook.sheet_names
-        }
-
-        tasks_sheet = sheet_names.get("maintenance_tasks")
-        trains_sheet = sheet_names.get("train_schedule")
-        blocks_sheet = sheet_names.get("available_blocks")
-        assets_sheet = sheet_names.get("assets")
-
-        if not tasks_sheet:
-            raise ValueError(
-                "maintenance_tasks sheet not found"
-            )
-
-        if not trains_sheet:
-            raise ValueError(
-                "train_schedule sheet not found"
-            )
-
-        if not blocks_sheet:
-            raise ValueError(
-                "available_blocks sheet not found"
-            )
-
-        if not assets_sheet:
-            raise ValueError(
-                "assets sheet not found"
-            )
-
-        tasks = pd.read_excel(
-            data_file,
-            sheet_name=tasks_sheet
+        train_schedule_collection.create_index(
+            "train_id",
+            unique=True
         )
 
-        trains = pd.read_excel(
-            data_file,
-            sheet_name=trains_sheet
+        available_blocks_collection.create_index(
+            "block_id",
+            unique=True
         )
 
-        blocks = pd.read_excel(
-            data_file,
-            sheet_name=blocks_sheet
+        assets_collection.create_index(
+            "asset_id",
+            unique=True
         )
 
-        assets = pd.read_excel(
-            data_file,
-            sheet_name=assets_sheet
+        print("MongoDB connected successfully.")
+        print("Railway database indexes initialized.")
+
+    except Exception as e:
+        print(
+            "DATABASE INITIALIZATION ERROR:",
+            repr(e)
         )
 
-        return tasks, blocks, trains, assets
 
-    # ========================================================
-    # CSV
-    # ========================================================
-
-    if data_file.suffix.lower() == ".csv":
-
-        raise ValueError(
-            "CSV mode is not supported for the multi-sheet railway dataset."
-        )
-
-    raise ValueError(
-        f"Unsupported dataset format: {data_file.suffix}"
-    )
-
-
-# ============================================================
+# =========================================================
 # ROOT
-# ============================================================
+# =========================================================
 
 @app.get("/")
 def root():
-
     return {
-        "message": "AI Railway Block Planner backend is running",
-        "status": "success"
+        "message": "AI Railway Block Planner API",
+        "status": "running"
     }
 
 
-# ============================================================
-# HEALTH CHECK
-# ============================================================
+# =========================================================
+# HEALTH
+# =========================================================
 
 @app.get("/health")
 def health():
+    try:
+        db.command("ping")
+
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "service": "AI Railway Block Planner"
+        }
+
+    except Exception as e:
+        return {
+            "status": "degraded",
+            "database": "disconnected",
+            "error": str(e)
+        }
+
+
+# =========================================================
+# DATA TEST
+# =========================================================
+
+@app.get("/data-test")
+def data_test():
 
     return {
-        "status": "healthy",
-        "service": "AI Railway Block Planner"
+        "maintenance_tasks":
+            maintenance_tasks_collection.count_documents({}),
+
+        "blocks":
+            available_blocks_collection.count_documents({}),
+
+        "trains":
+            train_schedule_collection.count_documents({}),
+
+        "assets":
+            assets_collection.count_documents({})
     }
 
 
-# ============================================================
-# AUTH - REGISTER
-# ============================================================
+# =========================================================
+# TASKS
+# =========================================================
 
-@app.post("/auth/register")
-def register(request: RegisterRequest):
+@app.get("/tasks")
+def get_tasks():
 
-    try:
+    return [
+        clean_document(x)
+        for x in maintenance_tasks_collection.find(
+            {},
+            {"_id": 0}
+        )
+    ]
 
-        user = create_user(
-            username=request.username,
-            email=request.email,
-            password=request.password
+
+@app.post("/tasks")
+def add_task(task: TaskCreate):
+
+    data = task.model_dump()
+
+    if maintenance_tasks_collection.find_one(
+        {"task_id": data["task_id"]}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Task ID already exists."
         )
 
-        return {
-            "status": "success",
-            "message": "Registration successful",
-            "user": user
-        }
+    maintenance_tasks_collection.insert_one(data)
 
-    except ValueError as e:
+    return {
+        "message": "Task added successfully",
+        "task": data
+    }
 
+
+@app.put("/tasks/{task_id}")
+def update_task(
+    task_id: str,
+    task: TaskCreate
+):
+
+    data = task.model_dump()
+
+    result = maintenance_tasks_collection.update_one(
+        {"task_id": task_id},
+        {"$set": data}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found."
+        )
+
+    return {
+        "message": "Task updated successfully"
+    }
+
+
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: str):
+
+    result = maintenance_tasks_collection.delete_one(
+        {"task_id": task_id}
+    )
+
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found."
+        )
+
+    return {
+        "message": "Task deleted successfully"
+    }
+
+
+# =========================================================
+# TRAINS
+# =========================================================
+
+@app.get("/trains")
+def get_trains():
+
+    return [
+        clean_document(x)
+        for x in train_schedule_collection.find(
+            {},
+            {"_id": 0}
+        )
+    ]
+
+
+@app.post("/trains")
+def add_train(train: TrainCreate):
+
+    data = train.model_dump()
+
+    if train_schedule_collection.find_one(
+        {"train_id": data["train_id"]}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Train ID already exists."
+        )
+
+    train_schedule_collection.insert_one(data)
+
+    return {
+        "message": "Train added successfully",
+        "train": data
+    }
+
+
+@app.put("/trains/{train_id}")
+def update_train(
+    train_id: str,
+    train: TrainCreate
+):
+
+    data = train.model_dump()
+
+    result = train_schedule_collection.update_one(
+        {"train_id": train_id},
+        {"$set": data}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Train not found."
+        )
+
+    return {
+        "message": "Train updated successfully"
+    }
+
+
+@app.delete("/trains/{train_id}")
+def delete_train(train_id: str):
+
+    result = train_schedule_collection.delete_one(
+        {"train_id": train_id}
+    )
+
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Train not found."
+        )
+
+    return {
+        "message": "Train deleted successfully"
+    }
+
+
+# =========================================================
+# BLOCKS
+# =========================================================
+
+@app.get("/blocks")
+def get_blocks():
+
+    return [
+        clean_document(x)
+        for x in available_blocks_collection.find(
+            {},
+            {"_id": 0}
+        )
+    ]
+
+
+@app.post("/blocks")
+def add_block(block: BlockCreate):
+
+    data = block.model_dump()
+
+    if available_blocks_collection.find_one(
+        {"block_id": data["block_id"]}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Block ID already exists."
+        )
+
+    available_blocks_collection.insert_one(data)
+
+    return {
+        "message": "Block added successfully",
+        "block": data
+    }
+
+
+@app.put("/blocks/{block_id}")
+def update_block(
+    block_id: str,
+    block: BlockCreate
+):
+
+    data = block.model_dump()
+
+    result = available_blocks_collection.update_one(
+        {"block_id": block_id},
+        {"$set": data}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Block not found."
+        )
+
+    return {
+        "message": "Block updated successfully"
+    }
+
+
+@app.delete("/blocks/{block_id}")
+def delete_block(block_id: str):
+
+    result = available_blocks_collection.delete_one(
+        {"block_id": block_id}
+    )
+
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Block not found."
+        )
+
+    return {
+        "message": "Block deleted successfully"
+    }
+
+
+# =========================================================
+# ASSETS
+# =========================================================
+
+@app.get("/assets")
+def get_assets():
+
+    return [
+        clean_document(x)
+        for x in assets_collection.find(
+            {},
+            {"_id": 0}
+        )
+    ]
+
+
+@app.post("/assets")
+def add_asset(asset: AssetCreate):
+
+    data = asset.model_dump()
+
+    if assets_collection.find_one(
+        {"asset_id": data["asset_id"]}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Asset ID already exists."
+        )
+
+    assets_collection.insert_one(data)
+
+    return {
+        "message": "Asset added successfully",
+        "asset": data
+    }
+
+
+@app.put("/assets/{asset_id}")
+def update_asset(
+    asset_id: str,
+    asset: AssetCreate
+):
+
+    data = asset.model_dump()
+
+    result = assets_collection.update_one(
+        {"asset_id": asset_id},
+        {"$set": data}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Asset not found."
+        )
+
+    return {
+        "message": "Asset updated successfully"
+    }
+
+
+@app.delete("/assets/{asset_id}")
+def delete_asset(asset_id: str):
+
+    result = assets_collection.delete_one(
+        {"asset_id": asset_id}
+    )
+
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Asset not found."
+        )
+
+    return {
+        "message": "Asset deleted successfully"
+    }
+
+
+# =========================================================
+# EXCEL UPLOAD
+# =========================================================
+
+@app.post("/upload-excel")
+async def upload_excel(
+    file: UploadFile = File(...)
+):
+
+    if not file.filename:
         raise HTTPException(
             status_code=400,
-            detail=str(e)
+            detail="No file selected."
         )
 
-    except Exception as e:
-
-        print("REGISTER ERROR:", repr(e))
-
+    if not file.filename.lower().endswith(
+        (".xlsx", ".xls")
+    ):
         raise HTTPException(
-            status_code=500,
-            detail="Registration failed"
+            status_code=400,
+            detail="Please upload an Excel file."
         )
-
-
-# ============================================================
-# AUTH - LOGIN
-# ============================================================
-
-@app.post("/auth/login")
-def login(request: LoginRequest):
 
     try:
+        contents = await file.read()
 
-        user = authenticate_user(
-            username_or_email=request.username,
-            password=request.password
+        excel = pd.ExcelFile(
+            io.BytesIO(contents)
         )
 
-        if user is None:
+        required_sheets = [
+            "maintenance_tasks",
+            "train_schedule",
+            "available_blocks",
+            "assets"
+        ]
 
+        missing = [
+            sheet
+            for sheet in required_sheets
+            if sheet not in excel.sheet_names
+        ]
+
+        if missing:
             raise HTTPException(
-                status_code=401,
-                detail="Invalid username/email or password"
+                status_code=400,
+                detail=(
+                    "Missing sheets: "
+                    + ", ".join(missing)
+                )
             )
 
+        tasks = pd.read_excel(
+            excel,
+            sheet_name="maintenance_tasks"
+        )
+
+        trains = pd.read_excel(
+            excel,
+            sheet_name="train_schedule"
+        )
+
+        blocks = pd.read_excel(
+            excel,
+            sheet_name="available_blocks"
+        )
+
+        assets = pd.read_excel(
+            excel,
+            sheet_name="assets"
+        )
+
+        # Convert NaN to None
+        tasks = tasks.where(
+            pd.notnull(tasks),
+            None
+        )
+
+        trains = trains.where(
+            pd.notnull(trains),
+            None
+        )
+
+        blocks = blocks.where(
+            pd.notnull(blocks),
+            None
+        )
+
+        assets = assets.where(
+            pd.notnull(assets),
+            None
+        )
+
+        task_records = tasks.to_dict(
+            orient="records"
+        )
+
+        train_records = trains.to_dict(
+            orient="records"
+        )
+
+        block_records = blocks.to_dict(
+            orient="records"
+        )
+
+        asset_records = assets.to_dict(
+            orient="records"
+        )
+
+        # Defaults required by planner
+        for task in task_records:
+            task.setdefault(
+                "condition",
+                "Good"
+            )
+            task.setdefault(
+                "required_block_type",
+                "Normal"
+            )
+
+        for block in block_records:
+            block.setdefault(
+                "block_type",
+                "Normal"
+            )
+            block.setdefault(
+                "status",
+                "Available"
+            )
+
+        for asset in asset_records:
+            asset.setdefault(
+                "condition",
+                "Good"
+            )
+
+        replace_collection(
+            maintenance_tasks_collection,
+            task_records
+        )
+
+        replace_collection(
+            train_schedule_collection,
+            train_records
+        )
+
+        replace_collection(
+            available_blocks_collection,
+            block_records
+        )
+
+        replace_collection(
+            assets_collection,
+            asset_records
+        )
+
         return {
-            "status": "success",
-            "message": "Login successful",
-            "user": user
+            "message":
+                "Excel data uploaded successfully",
+
+            "maintenance_tasks":
+                len(task_records),
+
+            "trains":
+                len(train_records),
+
+            "blocks":
+                len(block_records),
+
+            "assets":
+                len(asset_records)
         }
 
     except HTTPException:
         raise
 
     except Exception as e:
-
-        print("LOGIN ERROR:", repr(e))
+        print(
+            "EXCEL UPLOAD ERROR:",
+            repr(e)
+        )
 
         raise HTTPException(
             status_code=500,
-            detail="Login failed"
+            detail=f"Excel upload failed: {str(e)}"
         )
 
 
-# ============================================================
-# DATA TEST
-# ============================================================
-
-@app.get("/data-test")
-def data_test():
-
-    try:
-
-        tasks, blocks, trains, assets = load_data()
-
-        return {
-            "status": "success",
-            "maintenance_tasks": len(tasks),
-            "blocks": len(blocks),
-            "trains": len(trains),
-            "assets": len(assets)
-        }
-
-    except Exception as e:
-
-        print("DATA TEST ERROR:", repr(e))
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
-
-# ============================================================
-# BLOCKS
-# ============================================================
-
-@app.get("/blocks")
-def get_blocks():
-
-    try:
-
-        tasks, blocks, trains, assets = load_data()
-
-        return {
-            "status": "success",
-            "blocks": blocks.fillna("").to_dict(
-                orient="records"
-            )
-        }
-
-    except Exception as e:
-
-        print("BLOCKS ERROR:", repr(e))
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
-
-# ============================================================
-# TRAINS
-# ============================================================
-
-@app.get("/trains")
-def get_trains():
-
-    try:
-
-        tasks, blocks, trains, assets = load_data()
-
-        return {
-            "status": "success",
-            "trains": trains.fillna("").to_dict(
-                orient="records"
-            )
-        }
-
-    except Exception as e:
-
-        print("TRAINS ERROR:", repr(e))
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
-
-# ============================================================
-# ASSETS
-# ============================================================
-
-@app.get("/assets")
-def get_assets():
-
-    try:
-
-        tasks, blocks, trains, assets = load_data()
-
-        return {
-            "status": "success",
-            "assets": assets.fillna("").to_dict(
-                orient="records"
-            )
-        }
-
-    except Exception as e:
-
-        print("ASSETS ERROR:", repr(e))
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
-
-
-# ============================================================
-# GENERATE OPTIMAL PLAN
-# ============================================================
+# =========================================================
+# GENERATE PLAN
+# =========================================================
 
 @app.get("/generate-plan")
 def generate_maintenance_plan():
 
     try:
 
-        tasks, blocks, trains, assets = load_data()
+        tasks = list(
+            maintenance_tasks_collection.find(
+                {},
+                {"_id": 0}
+            )
+        )
+
+        blocks = list(
+            available_blocks_collection.find(
+                {},
+                {"_id": 0}
+            )
+        )
+
+        trains = list(
+            train_schedule_collection.find(
+                {},
+                {"_id": 0}
+            )
+        )
+
+        if not tasks:
+            raise HTTPException(
+                status_code=400,
+                detail="No maintenance tasks available."
+            )
+
+        if not blocks:
+            raise HTTPException(
+                status_code=400,
+                detail="No available blocks available."
+            )
 
         result = generate_plan(
             tasks,
@@ -420,16 +753,16 @@ def generate_maintenance_plan():
 
         return result
 
+    except HTTPException:
+        raise
+
     except Exception as e:
+        print(
+            "PLAN GENERATION ERROR:",
+            repr(e)
+        )
 
-        print("GENERATE PLAN ERROR:", repr(e))
-
-        return {
-            "status": "error",
-            "planned_tasks": 0,
-            "unplanned_tasks": 0,
-            "total_tasks": 0,
-            "planning_efficiency": 0,
-            "plan": [],
-            "error": str(e)
-        }
+        raise HTTPException(
+            status_code=500,
+            detail=f"Plan generation failed: {str(e)}"
+        )
